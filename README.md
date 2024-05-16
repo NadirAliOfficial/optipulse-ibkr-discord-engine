@@ -342,5 +342,3 @@ If something isn't working:
 
 **Happy Scanning! 🚀**
 <!-- updated: 2026-06-13 -->
-
-
