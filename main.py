@@ -25,7 +25,7 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════════════════════════
 
 IB_HOST = os.getenv("IB_HOST", "127.0.0.1")
-IB_PORT = int(os.getenv("IB_PORT", "7497"))
+IB_PORT = int(os.getenv("IB_PORT", "4002"))
 IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", "1"))
 SYMBOL = os.getenv("SYMBOL", "SHOP")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
