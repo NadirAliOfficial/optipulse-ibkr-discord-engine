@@ -53,7 +53,7 @@ RSI_PUT_MIN, RSI_PUT_MAX = 30, 60
 MIN_SCORE = 5
 TOTAL_CHECKS = 7
 REQUIRE_MULTI_TF_STRICT = True  # NEW: Require 5m + 15m alignment
-VOLUME_IS_HARD_GATE = True      # NEW: Volume must pass (not just scored)
+VOLUME_IS_HARD_GATE = False      # NEW: Volume must pass (not just scored)
 
 # ═══ PHASE 2: Enhanced Options Filters ═══
 DELTA_MIN, DELTA_MAX = 0.40, 0.60  # Tightened from 0.30-0.60
@@ -344,7 +344,14 @@ def score_multi_timeframe(tf_data):
     score = sum(1 for c in checks if c.passed)
     
     # PHASE 2: Calculate entry/stop levels for chart
-    primary_df = tf_data.get("5m") or tf_data.get("1m") or list(tf_data.values())[0]
+    primary_df = None
+    if tf_data.get("5m") is not None:
+        primary_df = tf_data.get("5m")
+    elif tf_data.get("1m") is not None:
+        primary_df = tf_data.get("1m")
+    else:
+        primary_df = [v for v in tf_data.values() if v is not None][0]
+    
     last_candle = primary_df.iloc[-1]
     entry_price = last_candle["close"]
     
