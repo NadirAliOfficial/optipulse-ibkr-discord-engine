@@ -20,7 +20,7 @@ from ib_insync import IB, Stock, Option
 load_dotenv()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CONFIG — PHASE 2 ENHANCEMENTS
+# CONFIG — PHASE 2.1 CLIENT TUNING
 # ══════════════════════════════════════════════════════════════════════════════
 
 IB_HOST = os.getenv("IB_HOST", "127.0.0.1")
@@ -49,34 +49,34 @@ VOLUME_EXPANSION_MULT = 1.5
 RSI_CALL_MIN, RSI_CALL_MAX = 40, 70
 RSI_PUT_MIN, RSI_PUT_MAX = 30, 60
 
-# ═══ PHASE 2: Enhanced Scoring ═══
+# ═══ PHASE 2.1: Tuned Scoring ═══
 MIN_SCORE = 5
 TOTAL_CHECKS = 7
-REQUIRE_MULTI_TF_STRICT = True  # NEW: Require 5m + 15m alignment
-VOLUME_IS_HARD_GATE = False      # NEW: Volume must pass (not just scored)
+REQUIRE_MULTI_TF_STRICT = True      # Keep 5m + 15m check
+VOLUME_IS_HARD_GATE = False         # CHANGED: Volume warns, doesn't block
+MULTI_TF_ALLOW_15M_LAG = True       # NEW: 15m can be neutral (not opposite)
 
-# ═══ PHASE 2: Enhanced Options Filters ═══
-DELTA_MIN, DELTA_MAX = 0.40, 0.60  # Tightened from 0.30-0.60
-STRIKE_RANGE = 0.02                 # Tightened from 0.10 (ATM ±2%)
-MAX_SPREAD_PERCENT = 0.15           # 15% max spread for QQQ
-MIN_OPTION_VOLUME = 50              # Increased from implicit 0
-MIN_OPEN_INTEREST = 500             # Increased from implicit 0
-MIN_DTE = 0                         # NEW: Allow 0DTE
-MAX_DTE = 2                         # NEW: Max 2 days (0DTE, 1DTE, 2DTE)
+# ═══ PHASE 2.1: Enhanced Options Filters ═══
+DELTA_MIN, DELTA_MAX = 0.40, 0.60
+STRIKE_RANGE = 0.02
+MAX_SPREAD_PERCENT = 0.15
+MIN_OPTION_VOLUME = 50
+MIN_OPEN_INTEREST = 500
+MIN_DTE = 0
+MAX_DTE = 2
 
 MAX_EXPIRATIONS = 2
 BATCH_SIZE = 40
 
-# ═══ PHASE 2: Alert Throttling ═══
-ALERT_COOLDOWN_SECONDS = 600        # 10 minutes (configurable: 600-1200)
-ALLOW_DIRECTION_FLIP = True         # NEW: Override cooldown on direction reversal
-
-# ═══ PHASE 2: Event-Based Alerts ═══
-ALERT_ON_THRESHOLD_CROSS = True     # NEW: Only alert when score crosses threshold
+# ═══ PHASE 2.1: Alert Throttling ═══
+ALERT_COOLDOWN_SECONDS = 600
+ALLOW_DIRECTION_FLIP = True
+ALERT_ON_THRESHOLD_CROSS = False    # CHANGED: Alert on first qualify, not just crosses
+DAILY_RESET_AT_OPEN = True          # NEW: Reset state at 9:30 ET
 
 SCAN_INTERVAL = 60
-MARKET_OPEN_HOUR, MARKET_OPEN_MIN = 0, 0
-MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN = 23, 59
+MARKET_OPEN_HOUR, MARKET_OPEN_MIN = 9, 30     # Changed to actual market hours
+MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN = 16, 0
 
 SHADOW_LOG_DIR = "shadow_logs"
 CHART_DIR = "charts"
@@ -89,11 +89,10 @@ log = logging.getLogger("optipulse")
 logging.getLogger("ib_insync.wrapper").setLevel(logging.WARNING)
 logging.getLogger("ib_insync.client").setLevel(logging.WARNING)
 
-# Timezone
 EASTERN = pytz.timezone('US/Eastern')
 
 # ══════════════════════════════════════════════════════════════════════════════
-# INDICATORS
+# INDICATORS (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def compute_ema(series, period):
@@ -136,7 +135,6 @@ def compute_bb_bandwidth(series, period=20, std=2.0):
     return ((sma + std * sd) - (sma - std * sd)) / sma.replace(0, np.nan)
 
 def enrich_df(df):
-    """Add all indicator columns to a DataFrame."""
     df = df.copy()
     df["ema_fast"] = compute_ema(df["close"], EMA_FAST)
     df["ema_slow"] = compute_ema(df["close"], EMA_SLOW)
@@ -151,7 +149,7 @@ def enrich_df(df):
     return df
 
 # ══════════════════════════════════════════════════════════════════════════════
-# BAR COLLECTOR
+# BAR COLLECTOR (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def bars_to_df(bars):
@@ -197,7 +195,7 @@ def get_current_price(ib, stock):
     return p if p == p else ticker.close
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SCORING ENGINE — PHASE 2 ENHANCED
+# SCORING ENGINE — PHASE 2.1 TUNED
 # ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -205,6 +203,7 @@ class CheckResult:
     name: str
     passed: bool
     detail: str
+    warning: bool = False  # NEW: For volume warnings
 
 @dataclass
 class SignalScore:
@@ -213,9 +212,10 @@ class SignalScore:
     total: int
     checks: List[CheckResult]
     tf_details: Dict[str, str] = field(default_factory=dict)
-    entry_price: float = 0.0          # NEW: For chart labeling
-    stop_loss: float = 0.0            # NEW: For chart labeling
-    signal_candle_time: str = ""      # NEW: Exact candle timestamp
+    entry_price: float = 0.0
+    stop_loss: float = 0.0
+    signal_candle_time: str = ""
+    volume_confirmed: bool = True  # NEW: Track volume separately
 
     @property
     def passed_names(self):
@@ -226,7 +226,8 @@ class SignalScore:
         return self.score >= MIN_SCORE
 
     def summary(self):
-        return f"{self.direction} {self.score}/{self.total} [{' | '.join(self.passed_names)}]"
+        vol_warn = " [⚠️ VOL]" if not self.volume_confirmed else ""
+        return f"{self.direction} {self.score}/{self.total}{vol_warn} [{' | '.join(self.passed_names)}]"
 
 def _score_single_tf(df):
     last = df.iloc[-1]
@@ -234,17 +235,14 @@ def _score_single_tf(df):
     direction = "CALL" if bullish else "PUT"
     checks = {}
 
-    # EMA
     checks["ema"] = {"passed": True, "detail": f"EMA9={last['ema_fast']:.2f} vs EMA21={last['ema_slow']:.2f}"}
 
-    # VWAP
     if pd.notna(last["vwap"]):
         vwap_ok = last["close"] > last["vwap"] if bullish else last["close"] < last["vwap"]
         checks["vwap"] = {"passed": vwap_ok, "detail": f"Close={last['close']:.2f} vs VWAP={last['vwap']:.2f}"}
     else:
         checks["vwap"] = {"passed": False, "detail": "VWAP N/A"}
 
-    # RSI
     rsi = last["rsi"]
     if bullish:
         rsi_ok = RSI_CALL_MIN <= rsi <= RSI_CALL_MAX
@@ -252,16 +250,14 @@ def _score_single_tf(df):
         rsi_ok = RSI_PUT_MIN <= rsi <= RSI_PUT_MAX
     checks["rsi"] = {"passed": rsi_ok, "detail": f"RSI={rsi:.1f}"}
 
-    # Volume - PHASE 2: Hard gate if enabled
+    # PHASE 2.1: Volume as warning, not blocker
     vol_pass = bool(last["vol_expansion"])
-    checks["volume"] = {"passed": vol_pass, "detail": f"Vol={last['volume']:.0f}"}
+    checks["volume"] = {"passed": vol_pass, "detail": f"Vol={last['volume']:.0f}", "warning": not vol_pass}
 
-    # ATR
     atr_ok = last["candle_range"] > 0.5 * last["atr"] if pd.notna(last["atr"]) else False
     checks["atr"] = {"passed": atr_ok,
                       "detail": f"Range={last['candle_range']:.2f} vs 0.5*ATR={0.5 * last['atr']:.2f}" if pd.notna(last["atr"]) else "N/A"}
 
-    # Chop
     adx_ok = last["adx"] > ADX_THRESHOLD if pd.notna(last["adx"]) else False
     bb_ok = last["bb_bw"] > BB_SQUEEZE_THRESHOLD if pd.notna(last["bb_bw"]) else False
     checks["chop"] = {"passed": adx_ok or bb_ok,
@@ -284,66 +280,64 @@ def score_multi_timeframe(tf_data):
     if not tf_scores:
         return SignalScore("NONE", 0, TOTAL_CHECKS, [])
 
-    # PHASE 2: Strict Multi-TF (require 5m + 15m agreement)
+    # PHASE 2.1: Relaxed Multi-TF (15m can lag)
     if REQUIRE_MULTI_TF_STRICT:
-        if "5m" not in tf_scores or "15m" not in tf_scores:
-            log.warning("⚠️  Strict mode: Need both 5m and 15m")
+        if "5m" not in tf_scores:
+            log.warning("⚠️  Need 5m timeframe")
             return SignalScore("NONE", 0, TOTAL_CHECKS, [])
         
         dir_5m = tf_scores["5m"]["direction"]
-        dir_15m = tf_scores["15m"]["direction"]
         
-        if dir_5m != dir_15m:
-            log.warning(f"⚠️  TF conflict: 5m={dir_5m}, 15m={dir_15m}")
-            return SignalScore("NONE", 0, TOTAL_CHECKS, [])
+        # PHASE 2.1: Check 15m is not opposite (can be same or missing)
+        if "15m" in tf_scores and MULTI_TF_ALLOW_15M_LAG:
+            dir_15m = tf_scores["15m"]["direction"]
+            if dir_15m != dir_5m:
+                log.warning(f"⚠️  TF opposite: 5m={dir_5m}, 15m={dir_15m} (BLOCKED)")
+                return SignalScore("NONE", 0, TOTAL_CHECKS, [])
         
         direction = dir_5m
         primary = tf_scores["5m"]
     else:
-        # Original: Use 5m as primary or first available
         primary = tf_scores.get("5m") or list(tf_scores.values())[0]
         direction = primary["direction"]
 
     checks = []
+    volume_confirmed = True
 
-    # PHASE 2: Volume as hard gate (must pass before scoring)
+    # PHASE 2.1: Volume doesn't block, just warns
     vol_check = primary["checks"]["volume"]
-    if VOLUME_IS_HARD_GATE and not vol_check["passed"]:
-        log.warning(f"⚠️  Volume hard gate FAILED: {vol_check['detail']}")
-        return SignalScore("NONE", 0, TOTAL_CHECKS, [])
+    if not vol_check["passed"]:
+        volume_confirmed = False
 
     # 1-5: from primary TF
     for name, label in [("ema", "EMA"), ("vwap", "VWAP"), ("rsi", "RSI"),
                          ("volume", "Volume"), ("atr", "ATR")]:
         c = primary["checks"][name]
-        checks.append(CheckResult(label, c["passed"], c["detail"]))
+        is_warning = c.get("warning", False)
+        checks.append(CheckResult(label, c["passed"], c["detail"], is_warning))
 
     # 6: Multi-TF agreement
     dirs = [s["direction"] for s in tf_scores.values()]
     
-    if REQUIRE_MULTI_TF_STRICT:
-        # Strict mode: 5m + 15m already checked, count 1m if available
-        agreement = 2  # 5m + 15m
-        if "1m" in tf_scores and tf_scores["1m"]["direction"] == direction:
-            agreement = 3
-        tf_check_pass = True  # Already enforced above
-        tf_detail = f"5m+15m aligned ({agreement}/3 TFs)"
+    if REQUIRE_MULTI_TF_STRICT and MULTI_TF_ALLOW_15M_LAG:
+        agreement = len([d for d in dirs if d == direction])
+        tf_check_pass = True  # Already checked above
+        tf_detail = f"5m={direction}, 15m not opposite ({agreement}/3 TFs)"
     else:
-        # Original: 2/3 agreement
         agreement = dirs.count(direction)
         tf_check_pass = agreement >= 2
         tf_detail = f"{agreement}/{len(dirs)} TFs agree"
     
     checks.append(CheckResult("Multi-TF", tf_check_pass, tf_detail))
 
-    # 7: Chop filter (any TF trending)
+    # 7: Chop filter
     chop_pass = any(s["checks"]["chop"]["passed"] for s in tf_scores.values())
     chop_detail = " | ".join(f"{tf}:{s['checks']['chop']['detail']}" for tf, s in tf_scores.items())
     checks.append(CheckResult("Chop", chop_pass, chop_detail))
 
     score = sum(1 for c in checks if c.passed)
     
-    # PHASE 2: Calculate entry/stop levels for chart
+    # Entry/stop calculation
     primary_df = None
     if tf_data.get("5m") is not None:
         primary_df = tf_data.get("5m")
@@ -355,23 +349,21 @@ def score_multi_timeframe(tf_data):
     last_candle = primary_df.iloc[-1]
     entry_price = last_candle["close"]
     
-    # Stop loss: Use ATR-based stop
     atr = last_candle["atr"] if pd.notna(last_candle["atr"]) else (entry_price * 0.01)
     if direction == "CALL":
         stop_loss = entry_price - (1.5 * atr)
     else:
         stop_loss = entry_price + (1.5 * atr)
     
-    # Signal candle time (ET)
     signal_time = last_candle.name.astimezone(EASTERN).strftime("%Y-%m-%d %H:%M:%S")
     
     return SignalScore(
         direction, score, TOTAL_CHECKS, checks, tf_details,
-        entry_price, stop_loss, signal_time
+        entry_price, stop_loss, signal_time, volume_confirmed
     )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CONTRACT PICKER — PHASE 2 ENHANCED
+# CONTRACT PICKER (unchanged from Phase 2)
 # ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -388,7 +380,7 @@ class ContractPick:
     iv: float
     volume: int
     oi: int
-    dte: int              # NEW: Days to expiration
+    dte: int
     rank_score: float
 
     def display_right(self):
@@ -401,7 +393,6 @@ class ContractPick:
                 f"Spread:${self.spread:.2f}({self.spread_pct:.1%})")
 
 def calculate_dte(expiry_str):
-    """Calculate days to expiration"""
     try:
         expiry = datetime.strptime(expiry_str, "%Y%m%d")
         now = datetime.now()
@@ -419,7 +410,6 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
 
     today = datetime.now().strftime("%Y%m%d")
     
-    # PHASE 2: DTE Filter (0-2 days only)
     expiries = []
     for e in sorted(chain.expirations):
         if e <= today:
@@ -436,7 +426,6 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
     
     log.info(f"  Using {len(expiries)} expiries: {', '.join(f'{calculate_dte(e)}DTE' for e in expiries)}")
     
-    # PHASE 2: Tighter strike selection (ATM ±2%)
     strikes = sorted([s for s in chain.strikes
                       if price * (1 - STRIKE_RANGE) <= s <= price * (1 + STRIKE_RANGE)])
     
@@ -484,7 +473,6 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
 
             spread_pct = spread / price_opt if price_opt > 0 else 1.0
             
-            # PHASE 2: Spread filter (15% max for QQQ)
             if spread_pct > MAX_SPREAD_PERCENT:
                 continue
             
@@ -492,16 +480,14 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
             oi_val = t.callOpenInterest if right == "C" else t.putOpenInterest
             oi = int(oi_val) if oi_val and oi_val >= 0 else 0
 
-            # PHASE 2: Volume/OI filters (higher minimums)
             if vol < MIN_OPTION_VOLUME or oi < MIN_OPEN_INTEREST:
                 continue
             
             dte = calculate_dte(t.contract.lastTradeDateOrContractMonth)
 
-            # Ranking: delta proximity 30%, spread 30%, liquidity 40%
-            d_score = abs(delta - 0.50) / 0.20  # Prefer 0.50 delta
+            d_score = abs(delta - 0.50) / 0.20
             s_score = min(spread_pct / MAX_SPREAD_PERCENT, 1.0)
-            l_score = max(0, 1.0 - ((vol + oi) / 2000))  # Higher liquidity = better
+            l_score = max(0, 1.0 - ((vol + oi) / 2000))
             rank = 0.30 * d_score + 0.30 * s_score + 0.40 * l_score
 
             picks.append(ContractPick(
@@ -529,7 +515,7 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
     return top
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CHARTING — PHASE 2 ENHANCED (Entry/Stop Labels)
+# CHARTING (unchanged from Phase 2)
 # ══════════════════════════════════════════════════════════════════════════════
 
 COLORS = {
@@ -540,7 +526,6 @@ COLORS = {
 }
 
 def generate_chart(tf_data, signal, contracts_text=""):
-    """PHASE 2: Enhanced chart with entry/stop labels"""
     primary = None
     for tf in ["5m", "1m", "15m"]:
         if tf in tf_data and tf_data[tf] is not None:
@@ -571,7 +556,6 @@ def generate_chart(tf_data, signal, contracts_text=""):
             for sp in ax.spines.values():
                 sp.set_color(COLORS["grid"])
 
-        # Candlesticks
         last_n = 50
         dp = df.tail(last_n).reset_index()
         n = len(dp)
@@ -589,15 +573,11 @@ def generate_chart(tf_data, signal, contracts_text=""):
         if "vwap" in dp.columns:
             ax_p.plot(x, dp["vwap"].values, color=COLORS["vwap"], lw=1.0, label="VWAP", alpha=0.7, ls="--")
 
-        # PHASE 2: Entry trigger line
         ti = n - 1
         ax_p.axhline(y=entry_price, color=COLORS["entry"], lw=2, alpha=0.7, ls="-", label=f"Entry: ${entry_price:.2f}")
-        
-        # PHASE 2: Stop loss line
         ax_p.axhline(y=stop_loss, color=COLORS["stop"], lw=2, alpha=0.7, ls="--", label=f"Stop: ${stop_loss:.2f}")
-        
-        # Trigger candle
         ax_p.axvline(x=ti, color=COLORS["trigger"], lw=2, alpha=0.4, ls="--")
+        
         arrow_emoji = "▲" if direction == "CALL" else "▼"
         ax_p.annotate(f"{arrow_emoji} ENTRY", xy=(ti, entry_price),
                        fontsize=10, fontweight="bold", color=COLORS["entry"], ha="center", va="bottom",
@@ -607,12 +587,10 @@ def generate_chart(tf_data, signal, contracts_text=""):
                      edgecolor=COLORS["grid"], labelcolor=COLORS["text"])
         ax_p.set_ylabel("Price", color=COLORS["text"], fontsize=9)
 
-        # Volume
         vc = [COLORS["vol_hi"] if dp.iloc[i].get("vol_expansion", False) else COLORS["vol_bar"] for i in range(n)]
         ax_v.bar(x, dp["volume"].values, color=vc, alpha=0.7, width=0.7)
         ax_v.set_ylabel("Vol", color=COLORS["text"], fontsize=9)
 
-        # RSI
         ax_r.plot(x, dp["rsi"].values, color=COLORS["rsi"], lw=1.2)
         ax_r.axhline(70, color=COLORS["bear"], lw=0.7, alpha=0.5, ls="--")
         ax_r.axhline(30, color=COLORS["bull"], lw=0.7, alpha=0.5, ls="--")
@@ -620,11 +598,9 @@ def generate_chart(tf_data, signal, contracts_text=""):
         ax_r.set_ylim(10, 90)
         ax_r.set_ylabel("RSI", color=COLORS["text"], fontsize=9)
 
-        # X labels (PHASE 2: ET timezone)
         if "date" in dp.columns:
             ticks = list(range(0, n, max(1, n // 8)))
             ax_r.set_xticks(ticks)
-            # Convert to ET for display
             labels = []
             for i in ticks:
                 dt = dp["date"].iloc[i]
@@ -637,15 +613,14 @@ def generate_chart(tf_data, signal, contracts_text=""):
         ax_p.set_xticklabels([])
         ax_v.set_xticklabels([])
 
-        # Title
         sc = COLORS["bull"] if score >= 6 else COLORS["trigger"] if score >= 5 else COLORS["bear"]
         checks_str = " ✓".join([""] + passed_checks)
-        fig.suptitle(f"{SYMBOL} {direction} Signal — {score}/{total}{checks_str}",
+        vol_warn = " [⚠️ VOL]" if not signal.volume_confirmed else ""
+        fig.suptitle(f"{SYMBOL} {direction} Signal — {score}/{total}{vol_warn}{checks_str}",
                      fontsize=13, fontweight="bold", color=sc, y=0.96)
 
-        # PHASE 2: Add signal time in footer
         now_et = datetime.now(EASTERN)
-        fig.text(0.99, 0.01, f"OptiPulse Phase 2 | {primary} | Signal: {signal.signal_candle_time} ET",
+        fig.text(0.99, 0.01, f"OptiPulse Phase 2.1 | {primary} | Signal: {signal.signal_candle_time} ET",
                  fontsize=7, color=COLORS["text"], alpha=0.5, ha="right", va="bottom")
 
         if contracts_text:
@@ -665,7 +640,7 @@ def generate_chart(tf_data, signal, contracts_text=""):
         return None
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DISCORD — PHASE 2 ENHANCED (Time Alignment)
+# DISCORD — PHASE 2.1
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _post(content, filepath=None):
@@ -683,24 +658,29 @@ def _post(content, filepath=None):
         log.error(f"Discord error: {e}")
 
 def send_signal_alert(signal, contracts, chart_path=None, latency_seconds=0):
-    """PHASE 2: Enhanced alert with timing info"""
     de = "🟢" if signal.direction == "CALL" else "🔴"
     bar = "🟩" * signal.score + "⬛" * (signal.total - signal.score)
+    
+    # PHASE 2.1: Volume warning
+    vol_warning = ""
+    if not signal.volume_confirmed:
+        vol_warning = "\n⚠️ **Volume not confirmed** - verify entry manually"
 
-    check_lines = "\n".join(f"{'✅' if c.passed else '❌'} {c.name}: {c.detail}" for c in signal.checks)
+    check_lines = "\n".join(
+        f"{'✅' if c.passed else '⚠️' if c.warning else '❌'} {c.name}: {c.detail}" 
+        for c in signal.checks
+    )
     tf_line = " | ".join(f"{tf}: {d}" for tf, d in signal.tf_details.items())
 
     contract_lines = "\n".join(f"  #{i+1} {p.line()}" for i, p in enumerate(contracts)) if contracts else "  None found (check filters)"
 
-    # PHASE 2: Entry/Stop info
     entry_stop = f"\n**Entry:** ${signal.entry_price:.2f} | **Stop:** ${signal.stop_loss:.2f}"
     
-    # PHASE 2: Timing (ET)
     alert_time_et = datetime.now(EASTERN).strftime("%Y-%m-%d %H:%M:%S")
     timing = f"\n**Signal Candle:** {signal.signal_candle_time} ET\n**Alert Sent:** {alert_time_et} ET\n**Latency:** {latency_seconds}s"
 
     msg = (f"{de} **{SYMBOL} {signal.direction} Signal — {signal.score}/{signal.total}**\n"
-           f"{bar}\n\n**Checks:**\n{check_lines}\n\n"
+           f"{bar}{vol_warning}\n\n**Checks:**\n{check_lines}\n\n"
            f"**Timeframes:** {tf_line}\n"
            f"{entry_stop}\n"
            f"**Top Contracts:**\n{contract_lines}\n"
@@ -712,17 +692,18 @@ def send_signal_alert(signal, contracts, chart_path=None, latency_seconds=0):
 
 def send_startup():
     now_et = datetime.now(EASTERN)
-    _post(f"🚀 **OptiPulse Phase 2 Started**\n"
+    _post(f"🚀 **OptiPulse Phase 2.1 Started**\n"
           f"Symbol: {SYMBOL}\nTimeframes: {', '.join(TIMEFRAMES.keys())}\n"
           f"Score: {MIN_SCORE}/{TOTAL_CHECKS}\nDelta: {DELTA_MIN}-{DELTA_MAX}\n"
           f"DTE Range: {MIN_DTE}-{MAX_DTE} days\n"
-          f"Strict Multi-TF: {'✅' if REQUIRE_MULTI_TF_STRICT else '❌'}\n"
-          f"Volume Hard Gate: {'✅' if VOLUME_IS_HARD_GATE else '❌'}\n"
+          f"Multi-TF: 5m req, 15m not-opposite OK\n"
+          f"Volume: Warning only (not blocking)\n"
+          f"Daily Reset: ✅ at 9:30 ET\n"
           f"Interval: {SCAN_INTERVAL}s\n⏰ {now_et:%I:%M:%S %p ET}")
 
 def send_shutdown():
     now_et = datetime.now(EASTERN)
-    _post(f"⏹️ **OptiPulse Phase 2 Stopped** — {now_et:%I:%M:%S %p ET}")
+    _post(f"⏹️ **OptiPulse Phase 2.1 Stopped** — {now_et:%I:%M:%S %p ET}")
 
 def send_eod_summary(total_scans, total_signals, signals_log, shadow_results):
     sig_lines = "\n".join(
@@ -749,7 +730,7 @@ def send_eod_summary(total_scans, total_signals, signals_log, shadow_results):
           f"⏰ {now_et:%I:%M:%S %p ET}")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SHADOW TRACKER
+# SHADOW TRACKER (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -854,7 +835,7 @@ class ShadowTracker:
                  "status": t.status} for t in self.trades]
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MAIN ENGINE — PHASE 2 ENHANCED (Cooldown + Event-Based Alerts)
+# MAIN ENGINE — PHASE 2.1 TUNED
 # ══════════════════════════════════════════════════════════════════════════════
 
 class OptiPulseEngine:
@@ -865,16 +846,17 @@ class OptiPulseEngine:
         self.total_scans = 0
         self.total_signals = 0
         
-        # PHASE 2: Alert state tracking
-        self.last_alert_time = {}      # {direction: timestamp}
-        self.last_signal_state = {}    # {symbol: {"direction": str, "score": int}}
+        # PHASE 2.1: Alert state tracking
+        self.last_alert_time = {}
+        self.last_signal_state = {}
+        self._daily_reset_done = False
         
         self.eod_sent = False
 
     def connect(self):
         log.info(f"Connecting to IBKR {IB_HOST}:{IB_PORT}...")
         self.ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID, timeout=60, readonly=True)
-        self.ib.reqMarketDataType(3)  # Delayed data
+        self.ib.reqMarketDataType(3)
         self.stock = Stock(SYMBOL, "SMART", "USD")
         self.ib.qualifyContracts(self.stock)
         log.info(f"✅ Connected — {SYMBOL}")
@@ -884,17 +866,28 @@ class OptiPulseEngine:
             self.ib.disconnect()
 
     def is_market_hours(self):
-        now = datetime.now()
-        o = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MIN, second=0)
-        c = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MIN, second=0)
+        now = datetime.now(EASTERN)
+        o = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MIN, second=0, microsecond=0)
+        c = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MIN, second=0, microsecond=0)
+        
+        # PHASE 2.1: Daily reset at market open
+        if DAILY_RESET_AT_OPEN and now.hour == 9 and 30 <= now.minute < 32 and not self._daily_reset_done:
+            log.info("📅 Market open - resetting alert state for fresh start")
+            self.last_alert_time = {}
+            self.last_signal_state = {}
+            self._daily_reset_done = True
+        elif now.hour != 9 or now.minute < 30:
+            self._daily_reset_done = False
+        
         return o <= now <= c
 
     def should_send_alert(self, signal):
         """
-        PHASE 2: Intelligent alert throttling
-        - Cooldown per direction (10-20 min)
-        - Override on direction flip
-        - Event-based: only on threshold cross
+        PHASE 2.1: Relaxed alert logic
+        - First qualify each day = alert
+        - Cooldown per direction
+        - Direction flip overrides
+        - No "score unchanged" blocking
         """
         direction = signal.direction
         score = signal.score
@@ -905,38 +898,28 @@ class OptiPulseEngine:
         last_direction = last_state.get("direction")
         last_score = last_state.get("score", 0)
         
-        # PHASE 2: Direction flip override
+        # PHASE 2.1: Direction flip override
         if ALLOW_DIRECTION_FLIP and last_direction and last_direction != direction:
-            log.info(f"  🔄 Direction flip: {last_direction} → {direction} (override cooldown)")
-            return True
+            log.info(f"  🔄 Direction flip: {last_direction} → {direction} (SEND)")
+            return True, "DIRECTION_FLIP"
         
-        # PHASE 2: Event-based alerts (threshold crossing)
-        if ALERT_ON_THRESHOLD_CROSS:
-            # Only alert if score increased across threshold
-            if last_score < MIN_SCORE and score >= MIN_SCORE:
-                log.info(f"  📈 Score crossed threshold: {last_score} → {score}")
-                return True
-            
-            # If already qualified and same direction, only alert on score improvement
-            if last_direction == direction and score > last_score:
-                log.info(f"  📈 Score improved: {last_score} → {score}")
-                return True
-            
-            # If score dropped and re-qualified
-            if last_direction == direction and last_score >= MIN_SCORE and score >= MIN_SCORE:
-                log.info(f"  ⏸️  Score unchanged/dropped: {last_score} → {score} (skip)")
-                return False
+        # PHASE 2.1: First qualify of the day = always alert
+        if not last_direction or last_score < MIN_SCORE:
+            log.info(f"  ✨ First qualifying signal today (SEND)")
+            return True, "FIRST_QUALIFY"
         
-        # PHASE 2: Cooldown check
+        # PHASE 2.1: Cooldown check (but less strict)
         last_alert = self.last_alert_time.get(direction, 0)
         time_since = now - last_alert
         
         if time_since < ALERT_COOLDOWN_SECONDS:
             remaining = int(ALERT_COOLDOWN_SECONDS - time_since)
-            log.info(f"  ⏳ Cooldown: {remaining}s remaining for {direction}")
-            return False
+            log.info(f"  ⏳ Cooldown: {remaining}s remaining for {direction} (SKIP: COOLDOWN)")
+            return False, "COOLDOWN"
         
-        return True
+        # PHASE 2.1: If cooldown passed and still qualifies = alert
+        log.info(f"  ✅ Cooldown passed, signal still valid (SEND)")
+        return True, "COOLDOWN_PASSED"
 
     def scan(self):
         self.total_scans += 1
@@ -953,7 +936,7 @@ class OptiPulseEngine:
 
             active = sum(1 for v in tf_data.values() if v is not None)
             if active < 2:
-                log.warning(f"⚠️  Only {active} TFs, need 2+")
+                log.warning(f"⚠️  Only {active} TFs, need 2+ (SKIP: INSUFFICIENT_DATA)")
                 return
 
             log.info("🧮 Scoring...")
@@ -961,36 +944,43 @@ class OptiPulseEngine:
             log.info(f"  → {signal.summary()}")
             
             for c in signal.checks:
-                log.info(f"    {'✅' if c.passed else '❌'} {c.name}: {c.detail}")
+                emoji = '✅' if c.passed else ('⚠️' if c.warning else '❌')
+                log.info(f"    {emoji} {c.name}: {c.detail}")
 
-            # Update state for event-based alerts
+            # Update state
             self.last_signal_state[SYMBOL] = {
                 "direction": signal.direction,
                 "score": signal.score
             }
 
             if not signal.qualifies:
-                log.info(f"  {signal.score}/{signal.total} < {MIN_SCORE} — skip")
+                log.info(f"  {signal.score}/{signal.total} < {MIN_SCORE} — skip (SKIP: SCORE_TOO_LOW)")
                 return
 
-            # PHASE 2: Check if we should alert
-            if not self.should_send_alert(signal):
+            # PHASE 2.1: Check if we should alert
+            should_alert, reason = self.should_send_alert(signal)
+            if not should_alert:
+                log.info(f"  Skip reason: {reason}")
                 return
 
-            log.info(f"🚨 SIGNAL: {signal.direction} {signal.score}/{signal.total}")
+            log.info(f"🚨 SIGNAL: {signal.direction} {signal.score}/{signal.total} (Reason: {reason})")
 
             log.info("🎯 Picking contracts...")
             contracts = pick_top_contracts(self.ib, self.stock, price, signal.direction)
+            
+            if not contracts:
+                log.warning("⚠️  No tradable contracts found (SKIP: CONTRACTS_NONE)")
+                # Still update state but don't alert
+                return
 
             log.info("📸 Charting...")
             ct = "\n".join(f"#{i+1} ${p.strike} {p.display_right()} Δ{p.delta:.2f} ${p.price:.2f}"
-                           for i, p in enumerate(contracts)) if contracts else "No tradable contracts found"
+                           for i, p in enumerate(contracts))
             chart_path = generate_chart(tf_data, signal, ct)
 
-            # Calculate latency
             latency = int(time.time() - scan_start)
 
-            log.info("📤 Sending alert...")
+            log.info(f"📤 Sending alert... (Reason: {reason})")
             send_signal_alert(signal, contracts, chart_path, latency)
 
             if contracts:
@@ -1000,7 +990,6 @@ class OptiPulseEngine:
                     top.price, top.strike, top.expiry, top.delta, top.iv,
                 )
 
-            # Update cooldown tracker
             self.last_alert_time[signal.direction] = time.time()
             self.total_signals += 1
 
@@ -1018,9 +1007,10 @@ class OptiPulseEngine:
         self.eod_sent = True
 
     def run(self):
-        log.info(f"🚀 OptiPulse Phase 2 — {SYMBOL}")
+        log.info(f"🚀 OptiPulse Phase 2.1 — {SYMBOL}")
         log.info(f"  TFs: {list(TIMEFRAMES.keys())} | Score: {MIN_SCORE}/{TOTAL_CHECKS}")
-        log.info(f"  Strict Multi-TF: {REQUIRE_MULTI_TF_STRICT} | Volume Gate: {VOLUME_IS_HARD_GATE}")
+        log.info(f"  Multi-TF: 5m req, 15m not-opposite | Volume: Warning only")
+        log.info(f"  Daily Reset: {DAILY_RESET_AT_OPEN} at 9:30 ET")
         log.info(f"  DTE: {MIN_DTE}-{MAX_DTE} | Δ: {DELTA_MIN}-{DELTA_MAX} | Spread: <{MAX_SPREAD_PERCENT*100:.0f}%")
         log.info(f"  Cooldown: {ALERT_COOLDOWN_SECONDS}s | Interval: {SCAN_INTERVAL}s\n")
 
@@ -1029,10 +1019,10 @@ class OptiPulseEngine:
 
         try:
             while True:
-                now = datetime.now()
+                now = datetime.now(EASTERN)
 
                 if not self.is_market_hours():
-                    if now.hour == MARKET_CLOSE_HOUR and now.minute < 15:
+                    if now.hour == 16 and now.minute < 15:
                         self.send_eod()
                     log.info("🌙 Market closed — 60s")
                     time.sleep(60)
@@ -1042,6 +1032,7 @@ class OptiPulseEngine:
                         self.shadow = ShadowTracker()
                         self.last_alert_time = {}
                         self.last_signal_state = {}
+                        self._daily_reset_done = False
                     continue
 
                 self.eod_sent = False
