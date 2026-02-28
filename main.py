@@ -24,7 +24,7 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════════════════════════
 
 IB_HOST = os.getenv("IB_HOST", "127.0.0.1")
-IB_PORT = int(os.getenv("IB_PORT", "7497"))
+IB_PORT = int(os.getenv("IB_PORT", "4002"))
 IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", "1"))
 SYMBOL = os.getenv("SYMBOL", "QQQ")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
@@ -75,8 +75,8 @@ ALERT_ON_THRESHOLD_CROSS = False    # CHANGED: Alert on first qualify, not just 
 DAILY_RESET_AT_OPEN = True          # NEW: Reset state at 9:30 ET
 
 SCAN_INTERVAL = 60
-MARKET_OPEN_HOUR, MARKET_OPEN_MIN = 0, 0     # Changed to actual market hours
-MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN = 23, 59
+MARKET_OPEN_HOUR, MARKET_OPEN_MIN = 9, 30     # Changed to actual market hours
+MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN = 16, 0
 
 SHADOW_LOG_DIR = "shadow_logs"
 CHART_DIR = "charts"
