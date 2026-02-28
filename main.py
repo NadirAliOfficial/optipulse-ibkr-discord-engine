@@ -24,7 +24,7 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════════════════════════
 
 IB_HOST = os.getenv("IB_HOST", "127.0.0.1")
-IB_PORT = int(os.getenv("IB_PORT", "7496"))
+IB_PORT = int(os.getenv("IB_PORT", "7497"))
 IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", "1"))
 SYMBOL = os.getenv("SYMBOL", "QQQ")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
@@ -75,8 +75,8 @@ ALERT_ON_THRESHOLD_CROSS = False    # CHANGED: Alert on first qualify, not just 
 DAILY_RESET_AT_OPEN = True          # NEW: Reset state at 9:30 ET
 
 SCAN_INTERVAL = 60
-MARKET_OPEN_HOUR, MARKET_OPEN_MIN = 9, 30     # Changed to actual market hours
-MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN = 16, 0
+MARKET_OPEN_HOUR, MARKET_OPEN_MIN = 0, 0     # Changed to actual market hours
+MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN = 23, 59
 
 SHADOW_LOG_DIR = "shadow_logs"
 CHART_DIR = "charts"
@@ -401,17 +401,29 @@ def calculate_dte(expiry_str):
         return 999
 
 def pick_top_contracts(ib, stock, price, direction, max_picks=3):
+    """PHASE 2.2: Returns (contracts_list, error_message)"""
     right = "C" if direction == "CALL" else "P"
     chains = ib.reqSecDefOptParams(stock.symbol, "", "STK", stock.conId)
     chain = next((c for c in chains if c.exchange == "SMART"), None)
     if not chain:
-        log.warning("⚠️  No SMART chain found")
-        return []
+        return [], "No SMART chain found"
 
-    today = datetime.now().strftime("%Y%m%d")
+    # PHASE 2.2: Enhanced DTE logging with timezone
+    now_et = datetime.now(EASTERN)
+    today = now_et.strftime("%Y%m%d")
+    
+    log.info(f"  📅 Today (ET): {today} | Time: {now_et:%Y-%m-%d %H:%M:%S %Z}")
+    
+    # Log what IBKR returned
+    all_expiries = sorted(chain.expirations)
+    log.info(f"  📊 IBKR returned {len(all_expiries)} expirations (showing first 5):")
+    for exp in all_expiries[:5]:
+        dte = calculate_dte(exp)
+        status = "✅" if MIN_DTE <= dte <= MAX_DTE else "❌"
+        log.info(f"     {status} {exp} -> {dte} DTE")
     
     expiries = []
-    for e in sorted(chain.expirations):
+    for e in all_expiries:
         if e <= today:
             continue
         dte = calculate_dte(e)
@@ -420,9 +432,21 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
     
     expiries = expiries[:MAX_EXPIRATIONS]
     
+    # PHASE 2.2: Fallback to 0-5 DTE if primary range empty
     if not expiries:
-        log.warning(f"⚠️  No expiries in {MIN_DTE}-{MAX_DTE} DTE range")
-        return []
+        log.warning(f"  ⚠️  No expiries in {MIN_DTE}-{MAX_DTE} DTE, trying fallback (0-5 DTE)...")
+        for e in all_expiries:
+            if e <= today:
+                continue
+            dte = calculate_dte(e)
+            if 0 <= dte <= 5:
+                expiries.append(e)
+        expiries = expiries[:MAX_EXPIRATIONS]
+        
+        if expiries:
+            log.info(f"  ✅ Fallback success: {len(expiries)} expiries (0-5 DTE)")
+        else:
+            return [], f"No expiries in 0-{MAX_DTE} DTE or 0-5 DTE fallback"
     
     log.info(f"  Using {len(expiries)} expiries: {', '.join(f'{calculate_dte(e)}DTE' for e in expiries)}")
     
@@ -430,8 +454,7 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
                       if price * (1 - STRIKE_RANGE) <= s <= price * (1 + STRIKE_RANGE)])
     
     if not strikes:
-        log.warning(f"⚠️  No strikes within ±{STRIKE_RANGE*100:.0f}% of ${price:.2f}")
-        return []
+        return [], f"No strikes within ±{STRIKE_RANGE*100:.0f}% of ${price:.2f}"
     
     log.info(f"  Strike range: ${min(strikes):.2f} - ${max(strikes):.2f} ({len(strikes)} strikes)")
 
@@ -441,8 +464,7 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
     valid = [c for c in contracts if c.conId > 0]
     
     if not valid:
-        log.warning("⚠️  No valid contracts after qualification")
-        return []
+        return [], "No valid contracts after qualification"
 
     picks = []
     for i in range(0, len(valid), BATCH_SIZE):
@@ -503,8 +525,7 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
                 pass
 
     if not picks:
-        log.warning("⚠️  No contracts passed all filters")
-        return []
+        return [], "No contracts passed filters (spread/volume/OI)"
     
     picks.sort(key=lambda p: p.rank_score)
     top = picks[:max_picks]
@@ -512,7 +533,7 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
     for i, p in enumerate(top):
         log.info(f"  #{i+1}: {p.line()}")
     
-    return top
+    return top, None  # Success, no error
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CHARTING (unchanged from Phase 2)
@@ -657,7 +678,7 @@ def _post(content, filepath=None):
     except Exception as e:
         log.error(f"Discord error: {e}")
 
-def send_signal_alert(signal, contracts, chart_path=None, latency_seconds=0):
+def send_signal_alert(signal, contracts, chart_path=None, latency_seconds=0, contract_warning=""):
     de = "🟢" if signal.direction == "CALL" else "🔴"
     bar = "🟩" * signal.score + "⬛" * (signal.total - signal.score)
     
@@ -672,7 +693,11 @@ def send_signal_alert(signal, contracts, chart_path=None, latency_seconds=0):
     )
     tf_line = " | ".join(f"{tf}: {d}" for tf, d in signal.tf_details.items())
 
-    contract_lines = "\n".join(f"  #{i+1} {p.line()}" for i, p in enumerate(contracts)) if contracts else "  None found (check filters)"
+    # PHASE 2.2: Show contract error if no contracts
+    if contracts:
+        contract_lines = "\n".join(f"  #{i+1} {p.line()}" for i, p in enumerate(contracts))
+    else:
+        contract_lines = "  ⚠️ None found - see error below"
 
     entry_stop = f"\n**Entry:** ${signal.entry_price:.2f} | **Stop:** ${signal.stop_loss:.2f}"
     
@@ -683,7 +708,8 @@ def send_signal_alert(signal, contracts, chart_path=None, latency_seconds=0):
            f"{bar}{vol_warning}\n\n**Checks:**\n{check_lines}\n\n"
            f"**Timeframes:** {tf_line}\n"
            f"{entry_stop}\n"
-           f"**Top Contracts:**\n{contract_lines}\n"
+           f"**Top Contracts:**\n{contract_lines}"
+           f"{contract_warning}\n"
            f"{timing}")
 
     if len(msg) > 1900:
@@ -966,22 +992,28 @@ class OptiPulseEngine:
             log.info(f"🚨 SIGNAL: {signal.direction} {signal.score}/{signal.total} (Reason: {reason})")
 
             log.info("🎯 Picking contracts...")
-            contracts = pick_top_contracts(self.ib, self.stock, price, signal.direction)
+            contracts, contract_error = pick_top_contracts(self.ib, self.stock, price, signal.direction)
             
+            # PHASE 2.2: Always alert, even if no contracts
+            # Client wants to see signal and manually check Webull
+            contract_warning = ""
             if not contracts:
-                log.warning("⚠️  No tradable contracts found (SKIP: CONTRACTS_NONE)")
-                # Still update state but don't alert
-                return
+                log.warning(f"⚠️  No tradable contracts: {contract_error}")
+                contract_warning = f"\n\n⚠️ **CONTRACTS: {contract_error}**\nManually check Webull for tradable options."
 
             log.info("📸 Charting...")
-            ct = "\n".join(f"#{i+1} ${p.strike} {p.display_right()} Δ{p.delta:.2f} ${p.price:.2f}"
-                           for i, p in enumerate(contracts))
+            if contracts:
+                ct = "\n".join(f"#{i+1} ${p.strike} {p.display_right()} Δ{p.delta:.2f} ${p.price:.2f}"
+                               for i, p in enumerate(contracts))
+            else:
+                ct = f"⚠️ {contract_error or 'No contracts found'}"
+            
             chart_path = generate_chart(tf_data, signal, ct)
 
             latency = int(time.time() - scan_start)
 
             log.info(f"📤 Sending alert... (Reason: {reason})")
-            send_signal_alert(signal, contracts, chart_path, latency)
+            send_signal_alert(signal, contracts, chart_path, latency, contract_warning)
 
             if contracts:
                 top = contracts[0]
