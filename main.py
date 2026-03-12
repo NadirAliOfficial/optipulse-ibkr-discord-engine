@@ -60,7 +60,7 @@ MULTI_TF_ALLOW_15M_LAG = True       # NEW: 15m can be neutral (not opposite)
 DELTA_MIN, DELTA_MAX = 0.40, 0.60
 STRIKE_RANGE = 0.02
 MAX_SPREAD_PERCENT = 0.15
-MIN_OPTION_VOLUME = 50
+MIN_OPTION_VOLUME = 10
 MIN_OPEN_INTEREST = 500
 MIN_DTE = 0
 MAX_DTE = 2
@@ -394,9 +394,9 @@ class ContractPick:
 
 def calculate_dte(expiry_str):
     try:
-        expiry = datetime.strptime(expiry_str, "%Y%m%d")
-        now = datetime.now()
-        return (expiry - now).days
+        expiry = datetime.strptime(expiry_str, "%Y%m%d").date()
+        today = datetime.now(EASTERN).date()
+        return (expiry - today).days
     except:
         return 999
 
@@ -424,7 +424,7 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
     
     expiries = []
     for e in all_expiries:
-        if e <= today:
+        if e < today:
             continue
         dte = calculate_dte(e)
         if MIN_DTE <= dte <= MAX_DTE:
@@ -436,7 +436,7 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
     if not expiries:
         log.warning(f"  ⚠️  No expiries in {MIN_DTE}-{MAX_DTE} DTE, trying fallback (0-5 DTE)...")
         for e in all_expiries:
-            if e <= today:
+            if e < today:
                 continue
             dte = calculate_dte(e)
             if 0 <= dte <= 5:
