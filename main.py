@@ -397,7 +397,7 @@ def calculate_dte(expiry_str):
         expiry = datetime.strptime(expiry_str, "%Y%m%d").date()
         today = datetime.now(EASTERN).date()
         return (expiry - today).days
-    except:
+    except Exception:
         return 999
 
 def pick_top_contracts(ib, stock, price, direction, max_picks=3):
@@ -521,7 +521,7 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
         for t in tickers:
             try: 
                 ib.cancelMktData(t.contract)
-            except: 
+            except Exception:
                 pass
 
     if not picks:
@@ -793,7 +793,7 @@ class ShadowTracker:
             try:
                 with open(p) as f:
                     self.trades = [ShadowTrade(**t) for t in json.load(f)]
-            except:
+            except Exception:
                 self.trades = []
 
     def _save(self):
@@ -847,7 +847,7 @@ class ShadowTracker:
                 try:
                     with open(os.path.join(SHADOW_LOG_DIR, f)) as fh:
                         all_trades.extend(json.load(fh))
-                except:
+                except Exception:
                     pass
         w = sum(1 for t in all_trades if t.get("status") == "WIN")
         l = sum(1 for t in all_trades if t.get("status") == "LOSS")
