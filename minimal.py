@@ -152,7 +152,7 @@ def scan():
         for t in tickers:
             try:
                 ib.cancelMktData(t.contract)
-            except:
+            except Exception:
                 pass
 
     ib.disconnect()
