@@ -791,14 +791,14 @@ class ShadowTracker:
         p = self._path()
         if os.path.exists(p):
             try:
-                with open(p) as f:
+                with open(p, encoding="utf-8") as f:
                     self.trades = [ShadowTrade(**t) for t in json.load(f)]
             except Exception:
                 self.trades = []
 
     def _save(self):
         try:
-            with open(self._path(), "w") as f:
+            with open(self._path(, encoding="utf-8"), "w") as f:
                 json.dump([asdict(t) for t in self.trades], f, indent=2)
         except Exception as e:
             log.error(f"Shadow save error: {e}")
