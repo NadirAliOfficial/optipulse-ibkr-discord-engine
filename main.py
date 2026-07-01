@@ -268,7 +268,7 @@ def _score_single_tf(df):
 def score_multi_timeframe(tf_data):
     tf_scores = {}
     tf_details = {}
-    
+
     for tf, df in tf_data.items():
         if df is None or len(df) < 25:
             continue
@@ -285,16 +285,16 @@ def score_multi_timeframe(tf_data):
         if "5m" not in tf_scores:
             log.warning("⚠️  Need 5m timeframe")
             return SignalScore("NONE", 0, TOTAL_CHECKS, [])
-        
+
         dir_5m = tf_scores["5m"]["direction"]
-        
+
         # PHASE 2.1: Check 15m is not opposite (can be same or missing)
         if "15m" in tf_scores and MULTI_TF_ALLOW_15M_LAG:
             dir_15m = tf_scores["15m"]["direction"]
             if dir_15m != dir_5m:
                 log.warning(f"⚠️  TF opposite: 5m={dir_5m}, 15m={dir_15m} (BLOCKED)")
                 return SignalScore("NONE", 0, TOTAL_CHECKS, [])
-        
+
         direction = dir_5m
         primary = tf_scores["5m"]
     else:
@@ -318,7 +318,7 @@ def score_multi_timeframe(tf_data):
 
     # 6: Multi-TF agreement
     dirs = [s["direction"] for s in tf_scores.values()]
-    
+
     if REQUIRE_MULTI_TF_STRICT and MULTI_TF_ALLOW_15M_LAG:
         agreement = len([d for d in dirs if d == direction])
         tf_check_pass = True  # Already checked above
@@ -327,7 +327,7 @@ def score_multi_timeframe(tf_data):
         agreement = dirs.count(direction)
         tf_check_pass = agreement >= 2
         tf_detail = f"{agreement}/{len(dirs)} TFs agree"
-    
+
     checks.append(CheckResult("Multi-TF", tf_check_pass, tf_detail))
 
     # 7: Chop filter
@@ -336,7 +336,7 @@ def score_multi_timeframe(tf_data):
     checks.append(CheckResult("Chop", chop_pass, chop_detail))
 
     score = sum(1 for c in checks if c.passed)
-    
+
     # Entry/stop calculation
     primary_df = None
     if tf_data.get("5m") is not None:
@@ -345,18 +345,18 @@ def score_multi_timeframe(tf_data):
         primary_df = tf_data.get("1m")
     else:
         primary_df = [v for v in tf_data.values() if v is not None][0]
-    
+
     last_candle = primary_df.iloc[-1]
     entry_price = last_candle["close"]
-    
+
     atr = last_candle["atr"] if pd.notna(last_candle["atr"]) else (entry_price * 0.01)
     if direction == "CALL":
         stop_loss = entry_price - (1.5 * atr)
     else:
         stop_loss = entry_price + (1.5 * atr)
-    
+
     signal_time = last_candle.name.astimezone(EASTERN).strftime("%Y-%m-%d %H:%M:%S")
-    
+
     return SignalScore(
         direction, score, TOTAL_CHECKS, checks, tf_details,
         entry_price, stop_loss, signal_time, volume_confirmed
@@ -411,9 +411,9 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
     # PHASE 2.2: Enhanced DTE logging with timezone
     now_et = datetime.now(EASTERN)
     today = now_et.strftime("%Y%m%d")
-    
+
     log.info(f"  📅 Today (ET): {today} | Time: {now_et:%Y-%m-%d %H:%M:%S %Z}")
-    
+
     # Log what IBKR returned
     all_expiries = sorted(chain.expirations)
     log.info(f"  📊 IBKR returned {len(all_expiries)} expirations (showing first 5):")
@@ -421,7 +421,7 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
         dte = calculate_dte(exp)
         status = "✅" if MIN_DTE <= dte <= MAX_DTE else "❌"
         log.info(f"     {status} {exp} -> {dte} DTE")
-    
+
     expiries = []
     for e in all_expiries:
         if e < today:
@@ -429,9 +429,9 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
         dte = calculate_dte(e)
         if MIN_DTE <= dte <= MAX_DTE:
             expiries.append(e)
-    
+
     expiries = expiries[:MAX_EXPIRATIONS]
-    
+
     # PHASE 2.2: Fallback to 0-5 DTE if primary range empty
     if not expiries:
         log.warning(f"  ⚠️  No expiries in {MIN_DTE}-{MAX_DTE} DTE, trying fallback (0-5 DTE)...")
@@ -442,27 +442,27 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
             if 0 <= dte <= 5:
                 expiries.append(e)
         expiries = expiries[:MAX_EXPIRATIONS]
-        
+
         if expiries:
             log.info(f"  ✅ Fallback success: {len(expiries)} expiries (0-5 DTE)")
         else:
             return [], f"No expiries in 0-{MAX_DTE} DTE or 0-5 DTE fallback"
-    
+
     log.info(f"  Using {len(expiries)} expiries: {', '.join(f'{calculate_dte(e)}DTE' for e in expiries)}")
-    
+
     strikes = sorted([s for s in chain.strikes
                       if price * (1 - STRIKE_RANGE) <= s <= price * (1 + STRIKE_RANGE)])
-    
+
     if not strikes:
         return [], f"No strikes within ±{STRIKE_RANGE*100:.0f}% of ${price:.2f}"
-    
+
     log.info(f"  Strike range: ${min(strikes):.2f} - ${max(strikes):.2f} ({len(strikes)} strikes)")
 
     contracts = [Option(stock.symbol, exp, s, right, "SMART") for exp in expiries for s in strikes]
     log.info(f"  Qualifying {len(contracts)} {direction} contracts...")
     ib.qualifyContracts(*contracts)
     valid = [c for c in contracts if c.conId > 0]
-    
+
     if not valid:
         return [], "No valid contracts after qualification"
 
@@ -475,7 +475,7 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
         for t in tickers:
             if not t.modelGreeks or not t.modelGreeks.delta:
                 continue
-            
+
             delta = abs(t.modelGreeks.delta)
             if not (DELTA_MIN <= delta <= DELTA_MAX):
                 continue
@@ -494,17 +494,17 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
                 spread = 0
 
             spread_pct = spread / price_opt if price_opt > 0 else 1.0
-            
+
             if spread_pct > MAX_SPREAD_PERCENT:
                 continue
-            
+
             vol = int(t.volume) if t.volume and t.volume >= 0 else 0
             oi_val = t.callOpenInterest if right == "C" else t.putOpenInterest
             oi = int(oi_val) if oi_val and oi_val >= 0 else 0
 
             if vol < MIN_OPTION_VOLUME or oi < MIN_OPEN_INTEREST:
                 continue
-            
+
             dte = calculate_dte(t.contract.lastTradeDateOrContractMonth)
 
             d_score = abs(delta - 0.50) / 0.20
@@ -519,20 +519,20 @@ def pick_top_contracts(ib, stock, price, direction, max_picks=3):
             ))
 
         for t in tickers:
-            try: 
+            try:
                 ib.cancelMktData(t.contract)
             except Exception:
                 pass
 
     if not picks:
         return [], "No contracts passed filters (spread/volume/OI)"
-    
+
     picks.sort(key=lambda p: p.rank_score)
     top = picks[:max_picks]
-    
+
     for i, p in enumerate(top):
         log.info(f"  #{i+1}: {p.line()}")
-    
+
     return top, None  # Success, no error
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -562,7 +562,7 @@ def generate_chart(tf_data, signal, contracts_text=""):
     passed_checks = signal.passed_names
     entry_price = signal.entry_price
     stop_loss = signal.stop_loss
-    
+
     try:
         fig = plt.figure(figsize=(14, 10), facecolor=COLORS["bg"])
         gs = fig.add_gridspec(3, 1, height_ratios=[3, 1, 1], hspace=0.05)
@@ -598,7 +598,7 @@ def generate_chart(tf_data, signal, contracts_text=""):
         ax_p.axhline(y=entry_price, color=COLORS["entry"], lw=2, alpha=0.7, ls="-", label=f"Entry: ${entry_price:.2f}")
         ax_p.axhline(y=stop_loss, color=COLORS["stop"], lw=2, alpha=0.7, ls="--", label=f"Stop: ${stop_loss:.2f}")
         ax_p.axvline(x=ti, color=COLORS["trigger"], lw=2, alpha=0.4, ls="--")
-        
+
         arrow_emoji = "▲" if direction == "CALL" else "▼"
         ax_p.annotate(f"{arrow_emoji} ENTRY", xy=(ti, entry_price),
                        fontsize=10, fontweight="bold", color=COLORS["entry"], ha="center", va="bottom",
@@ -681,14 +681,14 @@ def _post(content, filepath=None):
 def send_signal_alert(signal, contracts, chart_path=None, latency_seconds=0, contract_warning=""):
     de = "🟢" if signal.direction == "CALL" else "🔴"
     bar = "🟩" * signal.score + "⬛" * (signal.total - signal.score)
-    
+
     # PHASE 2.1: Volume warning
     vol_warning = ""
     if not signal.volume_confirmed:
         vol_warning = "\n⚠️ **Volume not confirmed** - verify entry manually"
 
     check_lines = "\n".join(
-        f"{'✅' if c.passed else '⚠️' if c.warning else '❌'} {c.name}: {c.detail}" 
+        f"{'✅' if c.passed else '⚠️' if c.warning else '❌'} {c.name}: {c.detail}"
         for c in signal.checks
     )
     tf_line = " | ".join(f"{tf}: {d}" for tf, d in signal.tf_details.items())
@@ -700,7 +700,7 @@ def send_signal_alert(signal, contracts, chart_path=None, latency_seconds=0, con
         contract_lines = "  ⚠️ None found - see error below"
 
     entry_stop = f"\n**Entry:** ${signal.entry_price:.2f} | **Stop:** ${signal.stop_loss:.2f}"
-    
+
     alert_time_et = datetime.now(EASTERN).strftime("%Y-%m-%d %H:%M:%S")
     timing = f"\n**Signal Candle:** {signal.signal_candle_time} ET\n**Alert Sent:** {alert_time_et} ET\n**Latency:** {latency_seconds}s"
 
@@ -871,12 +871,12 @@ class OptiPulseEngine:
         self.shadow = ShadowTracker()
         self.total_scans = 0
         self.total_signals = 0
-        
+
         # PHASE 2.1: Alert state tracking
         self.last_alert_time = {}
         self.last_signal_state = {}
         self._daily_reset_done = False
-        
+
         self.eod_sent = False
 
     def connect(self):
@@ -895,7 +895,7 @@ class OptiPulseEngine:
         now = datetime.now(EASTERN)
         o = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MIN, second=0, microsecond=0)
         c = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MIN, second=0, microsecond=0)
-        
+
         # PHASE 2.1: Daily reset at market open
         if DAILY_RESET_AT_OPEN and now.hour == 9 and 30 <= now.minute < 32 and not self._daily_reset_done:
             log.info("📅 Market open - resetting alert state for fresh start")
@@ -904,7 +904,7 @@ class OptiPulseEngine:
             self._daily_reset_done = True
         elif now.hour != 9 or now.minute < 30:
             self._daily_reset_done = False
-        
+
         return o <= now <= c
 
     def should_send_alert(self, signal):
@@ -918,31 +918,31 @@ class OptiPulseEngine:
         direction = signal.direction
         score = signal.score
         now = time.time()
-        
+
         # Check last state
         last_state = self.last_signal_state.get(SYMBOL, {})
         last_direction = last_state.get("direction")
         last_score = last_state.get("score", 0)
-        
+
         # PHASE 2.1: Direction flip override
         if ALLOW_DIRECTION_FLIP and last_direction and last_direction != direction:
             log.info(f"  🔄 Direction flip: {last_direction} → {direction} (SEND)")
             return True, "DIRECTION_FLIP"
-        
+
         # PHASE 2.1: First qualify of the day = always alert
         if not last_direction or last_score < MIN_SCORE:
             log.info(f"  ✨ First qualifying signal today (SEND)")
             return True, "FIRST_QUALIFY"
-        
+
         # PHASE 2.1: Cooldown check (but less strict)
         last_alert = self.last_alert_time.get(direction, 0)
         time_since = now - last_alert
-        
+
         if time_since < ALERT_COOLDOWN_SECONDS:
             remaining = int(ALERT_COOLDOWN_SECONDS - time_since)
             log.info(f"  ⏳ Cooldown: {remaining}s remaining for {direction} (SKIP: COOLDOWN)")
             return False, "COOLDOWN"
-        
+
         # PHASE 2.1: If cooldown passed and still qualifies = alert
         log.info(f"  ✅ Cooldown passed, signal still valid (SEND)")
         return True, "COOLDOWN_PASSED"
@@ -950,7 +950,7 @@ class OptiPulseEngine:
     def scan(self):
         self.total_scans += 1
         log.info(f"═══ Scan #{self.total_scans} ═══")
-        
+
         scan_start = time.time()
 
         try:
@@ -968,7 +968,7 @@ class OptiPulseEngine:
             log.info("🧮 Scoring...")
             signal = score_multi_timeframe(tf_data)
             log.info(f"  → {signal.summary()}")
-            
+
             for c in signal.checks:
                 emoji = '✅' if c.passed else ('⚠️' if c.warning else '❌')
                 log.info(f"    {emoji} {c.name}: {c.detail}")
@@ -993,7 +993,7 @@ class OptiPulseEngine:
 
             log.info("🎯 Picking contracts...")
             contracts, contract_error = pick_top_contracts(self.ib, self.stock, price, signal.direction)
-            
+
             # PHASE 2.2: Always alert, even if no contracts
             # Client wants to see signal and manually check Webull
             contract_warning = ""
@@ -1007,7 +1007,7 @@ class OptiPulseEngine:
                                for i, p in enumerate(contracts))
             else:
                 ct = f"⚠️ {contract_error or 'No contracts found'}"
-            
+
             chart_path = generate_chart(tf_data, signal, ct)
 
             latency = int(time.time() - scan_start)
